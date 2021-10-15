@@ -1,0 +1,175 @@
+#include <stdio.h>
+
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <std_msgs/msg/char.h>
+#include <geometry_msgs/msg/twist.h>
+#include <rmw_microros/rmw_microros.h>
+
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+#include "hardware/pwm.h"
+#include "hardware/adc.h"
+#include "pico_uart_transports.h"
+
+const uint LED_PIN = 25;
+
+rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
+
+std_msgs__msg__Char msg[50];
+geometry_msgs__msg__Twist cmd_vel_msg; // MOD. TO RECIVE TWIST MSG 
+//std_msgs__msg__Int32 recv_msg ={0};
+geometry_msgs__msg__Twist cmd_vel; 
+
+// MOTOR DEFINITION
+const uint SB = 19;
+// ---------------Motor 1--------
+const uint CW_1 = 15;
+const uint CCW_1 = 14;
+const uint PWM_1 = 13;
+
+// ---------------Motor 2--------
+const uint CW_2 = 16;
+const uint CCW_2 = 17;
+const uint PWM_2 = 18;
+
+//
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time)
+{
+
+    rcl_ret_t ret = rcl_publish(&publisher, &msg, NULL);
+    //msg.data++;
+}
+
+void subscription_callback(const void * msgin)
+{
+    const geometry_msgs__msg__Twist * recv_msg = (const geometry_msgs__msg__Twist *)msgin;
+
+    printf("Received: %d\n", recv_msg->linear.x);
+
+    if (recv_msg->linear.x == 0)
+    {
+        gpio_put(LED_PIN, 0); 
+    } else{
+        gpio_put(LED_PIN, 1);
+    }
+    sprintf(&msg->data,"%f",recv_msg->linear.x);
+
+    cmd_vel.linear.x = recv_msg->linear.x;
+    cmd_vel.angular.z = recv_msg->angular.z;
+
+}
+
+
+void forward(uint *slice_num)
+{
+    long pwm_value = map(cmd_vel.linear.x, 0, 100, 0, 255); // REVISAR AQUI TERMINO EL 20201014
+
+    pwm_set_chan_level(&slice_num, PWM_CHAN_A, pwm_value);
+
+
+}
+
+
+int main()
+{
+    rmw_uros_set_custom_transport(
+		true,
+		NULL,
+		pico_serial_transport_open,
+		pico_serial_transport_close,
+		pico_serial_transport_write,
+		pico_serial_transport_read
+	);
+
+    // --------------------
+
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+
+    gpio_init(CW_1);
+    gpio_set_dir(CW_1, GPIO_OUT);
+
+    gpio_init(CCW_1);
+    gpio_set_dir(CCW_1, GPIO_OUT);
+
+    gpio_init(SB);
+    gpio_set_dir(SB, GPIO_OUT);
+
+    gpio_set_function(PWM_1, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PWM_1);
+
+    pwm_set_wrap(slice_num, 255);
+    pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
+    pwm_set_enabled(slice_num, true);
+
+
+
+
+   // --------------------
+
+
+
+
+    rcl_timer_t timer;
+    rcl_node_t node;
+    rcl_allocator_t allocator;
+    rclc_support_t support;
+    rclc_executor_t executor;
+
+    allocator = rcl_get_default_allocator();
+
+    // Wait for agent successful ping for 2 minutes.
+    const int timeout_ms = 1000; 
+    const uint8_t attempts = 120;
+
+    rcl_ret_t ret = rmw_uros_ping_agent(timeout_ms, attempts);
+
+    if (ret != RCL_RET_OK)
+    {
+        // Unreachable agent, exiting program.
+        return ret;
+    }
+
+    rclc_support_init(&support, 0, NULL, &allocator);
+
+    rclc_node_init_default(&node, "pico_node_C", "", &support);
+
+    rclc_publisher_init_default(
+        &publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Char),
+        "pico_publisher_C");
+
+    rclc_subscription_init_default(
+        &subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/cmd_vel");
+
+    rclc_timer_init_default(
+        &timer,
+        &support,
+        RCL_MS_TO_NS(1000),
+        timer_callback);
+
+    // (,,# of functions to execute)
+
+    rclc_executor_init(&executor, &support.context, 2, &allocator);
+
+    rclc_executor_add_timer(&executor, &timer);
+
+    rclc_executor_add_subscription(&executor, &subscriber, &cmd_vel_msg, &subscription_callback, ON_NEW_DATA);
+    
+    while (true)
+    {
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+    }
+    return 0;
+}
+
+
